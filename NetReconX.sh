@@ -27,6 +27,192 @@ center_text() {
     printf "%s\n" "$1"
 }
 
+# Function to save postponed tools state
+save_postponed_state() {
+    echo "Saving postponed tools state..."
+    > "$STATE_FILE"  # Clear the file
+    for tool in "${!POSTPONED_TOOLS[@]}"; do
+        status="${TOOL_STATUS[$tool]}"
+        echo "$tool:$status:${POSTPONED_TOOLS[$tool]}" >> "$STATE_FILE"
+    done
+}
+
+# Function to load postponed tools state
+load_postponed_state() {
+    if [[ -f "$STATE_FILE" ]]; then
+        echo "Loading postponed tools state..."
+        while IFS=: read -r tool status token; do
+            POSTPONED_TOOLS["$tool"]="$token"
+            TOOL_STATUS["$tool"]="$status"
+        done < "$STATE_FILE"
+    fi
+}
+
+# Function to handle tool postponement
+postpone_tool() {
+    local tool="$1"
+    local token="$2"
+    
+    echo -e "\nDo you want to postpone $tool? (y/n)"
+    read -r response
+    
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        echo "For how long? (in minutes, or 'later' for manual run)"
+        read -r delay
+        
+        if [[ "$delay" == "later" ]]; then
+            POSTPONED_TOOLS["$tool"]="$token"
+            TOOL_STATUS["$tool"]="manual"
+            echo "✅ $tool postponed for manual run later"
+        elif [[ "$delay" =~ ^[0-9]+$ ]]; then
+            POSTPONED_TOOLS["$tool"]="$token"
+            TOOL_STATUS["$tool"]="$delay"
+            echo "✅ $tool postponed for $delay minutes"
+        else
+            echo "Invalid input. Tool will run now."
+            return 1
+        fi
+        return 0
+    fi
+    return 1
+}
+
+# Function to show postponed tools
+show_postponed_tools() {
+    if [[ ${#POSTPONED_TOOLS[@]} -eq 0 ]]; then
+        echo "No tools are currently postponed."
+        return
+    fi
+    
+    echo -e "\n📋 Currently Postponed Tools:"
+    echo "--------------------------------"
+    for tool in "${!POSTPONED_TOOLS[@]}"; do
+        status="${TOOL_STATUS[$tool]}"
+        if [[ "$status" == "manual" ]]; then
+            echo "- $tool (Waiting for manual run)"
+        else
+            echo "- $tool (Will run in $status minutes)"
+        fi
+    done
+    echo "--------------------------------"
+}
+
+# Function to run postponed tools
+run_postponed_tools() {
+    local current_time
+    current_time=$(date +%s)
+
+    echo "🔍 Checking postponed tools..."
+
+    for tool in "${!POSTPONED_TOOLS[@]}"; do
+        local status token
+        status="${TOOL_STATUS[$tool]}"
+        token="${POSTPONED_TOOLS[$tool]}"
+
+        if [[ "$status" == "manual" ]]; then
+            # Ask user if they want to run the manual postponed tool
+            while true; do
+                read -rp "❓ Do you want to run '$tool' now? (y/n): " response
+                case "$response" in
+                    [Yy])
+                        echo "✅ Running $tool now..."
+                        TEMP_ARRAY_TOOL_TOKEN["$token"]="$tool"
+                        unset "POSTPONED_TOOLS[$tool]"
+                        unset "TOOL_STATUS[$tool]"
+                        break
+                        ;;
+                    [Nn])
+                        echo "ℹ️ Skipping $tool for now (still postponed)"
+                        break
+                        ;;
+                    *)
+                        echo "❌ Invalid input. Please enter 'y' or 'n'."
+                        ;;
+                esac
+            done
+        elif [[ "$status" =~ ^[0-9]+$ ]]; then
+            # Status is a UNIX timestamp; check if time has passed
+            if (( current_time >= status )); then
+                echo "✅ Running $tool now (delay expired)..."
+                TEMP_ARRAY_TOOL_TOKEN["$token"]="$tool"
+                unset "POSTPONED_TOOLS[$tool]"
+                unset "TOOL_STATUS[$tool]"
+            else
+                local minutes_left=$(( (status - current_time) / 60 ))
+                if (( minutes_left < 0 )); then minutes_left=0; fi
+                echo "⏳ $tool will run in about $minutes_left more minutes."
+            fi
+        else
+            echo "⚠️ Unknown status for $tool: '$status' (skipping)"
+        fi
+    done
+
+    # If any tools are ready to run, execute them
+    if [[ ${#TEMP_ARRAY_TOOL_TOKEN[@]} -gt 0 ]]; then
+        echo "🚀 Executing ready tools..."
+        execute_tools
+        return 0
+    else
+        echo "ℹ️ No postponed tools are ready to run yet."
+        return 1
+    fi
+}
+
+# Handle postponed tools separately
+handle_postponed_tools() {
+    echo "⏱️ Checking for postponed tools..."
+
+    if [[ ${#POSTPONED_TOOLS[@]} -eq 0 ]]; then
+        echo "ℹ️ No tools were postponed."
+        return
+    fi
+
+    echo "📋 Found ${#POSTPONED_TOOLS[@]} postponed tools:"
+    for tool in "${!POSTPONED_TOOLS[@]}"; do
+        status="${TOOL_STATUS[$tool]}"
+        if [[ "$status" == "manual" ]]; then
+            echo "- $tool (⏳ Waiting for manual run)"
+        elif [[ "$status" =~ ^[0-9]+$ ]]; then
+            current_time=$(date +%s)
+            minutes_left=$(( (status - current_time) / 60 ))
+            if (( minutes_left < 0 )); then
+                minutes_left=0
+            fi
+            echo "- $tool (🕒 Will run in $minutes_left minutes)"
+        else
+            echo "- $tool (⚠️ Unknown status: $status)"
+        fi
+    done
+
+    echo
+
+    # Ask the user if they want to run postponed tools
+    while true; do
+        read -rp "❓ Do you want to run postponed tools now? (y/n): " response
+
+        case "$response" in
+            [Yy])
+                echo "🔄 Running postponed tools..."
+                if ! run_postponed_tools; then
+                    echo "⚠️ Some postponed tools failed, but continuing..."
+                fi
+                # Clear the state file after running postponed tools
+                rm -f "$STATE_FILE"
+                break
+                ;;
+            [Nn])
+                echo "ℹ️ Skipping postponed tools. You can run them later using:"
+                echo "   ./NetReconX.sh --run-postponed"
+                save_postponed_state
+                break
+                ;;
+            *)
+                echo "❌ Invalid input. Please enter 'y' or 'n'."
+                ;;
+        esac
+    done
+}
+
 # Function to display animated banner
 show_banner() {
     local banner=(
@@ -94,7 +280,11 @@ DEBUG_MODE=true  # Set to false to disable debug logs
 OUTPUT_DIR="./output_dir"
 #♣ Ensure output directory exists
 mkdir -p "$OUTPUT_DIR" 
+# Global associative arrays 
+declare -gA POSTPONED_TOOLS TOOL_STATUS
 
+# State file for postponed tools
+STATE_FILE="postponed_tools.state"
 
 LOG_FILE="netreconx.log"
 
@@ -1451,9 +1641,9 @@ execute_tools() {
 
 
 
-  ip_address="10.10.11.63"
+  ip_address="$ip_address"
 
-   dns_server="whiterabbit.htb"
+   dns_server="$fqdn"
 
 
 
@@ -1476,24 +1666,78 @@ fi
         return
 
     fi
+   # First, populate POSTPONED_TOOLS array with all tools
 
+for token in "${!TEMP_ARRAY_TOOL_TOKEN[@]}"; do
+    tool="${TEMP_ARRAY_TOOL_TOKEN[$token]}"
+    echo "Processing Token: $token => Tool: $tool"
 
-   # Iterate through TEMP_ARRAY_TOOL_TOKEN and execute the corresponding tools
+    # Skip if tool is already postponed
+    if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+        echo "ℹ️ $tool is already postponed"
+        continue
+    fi
 
-    for token in "${!TEMP_ARRAY_TOOL_TOKEN[@]}"; do
+    while true; do
+        read -rp "❓ Do you want to postpone $tool? (y/n): " postpone_choice
 
-        # Get the corresponding tool name
+        case "$postpone_choice" in
+            [Yy])
+                while true; do
+                    read -rp "⏳ For how long? (in minutes, or type 'later' for manual run): " delay
+                    if [[ "$delay" == "later" ]]; then
+                        POSTPONED_TOOLS["$tool"]="$token"
+                        TOOL_STATUS["$tool"]="manual"
+                        echo "✅ $tool postponed for manual run later"
+                        break
+                    elif [[ "$delay" =~ ^[0-9]+$ ]]; then
+                        future_timestamp=$(( $(date +%s) + (delay * 60) ))
+                        POSTPONED_TOOLS["$tool"]="$token"
+                        TOOL_STATUS["$tool"]="$future_timestamp"
+                        echo "✅ $tool postponed for $delay minutes (until $(date -d "@$future_timestamp"))"
+                        break
+                    else
+                        echo "❌ Invalid input. Please enter a number (minutes) or 'later'."
+                    fi
+                done
+                break
+                ;;
+            [Nn])
+                echo "➡️  $tool will be executed immediately."
+                break
+                ;;
+            *)
+                echo "❌ Invalid choice. Please enter 'y' or 'n'."
+                ;;
+        esac
+    done
+done
 
-        tool="${TEMP_ARRAY_TOOL_TOKEN[$token]}"
+# Save the initial postponed state
+save_postponed_state
 
+# Now execute tools, checking for postponement
+for token in "${!TEMP_ARRAY_TOOL_TOKEN[@]}"; do
+    tool="${TEMP_ARRAY_TOOL_TOKEN[$token]}"
 
+    # Check if tool is postponed
+    if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+        status="${TOOL_STATUS[$tool]}"
 
-        # Debug: Print the token and corresponding tool
+        if [[ "$status" == "manual" ]]; then
+            echo "ℹ️ Skipping $tool (scheduled for manual run)"
+            continue
+        fi
 
-        echo "Processing Token: $token => Tool: $tool"
-
-
-
+        if [[ "$status" =~ ^[0-9]+$ ]]; then
+            current_time=$(date +%s)
+            if (( current_time < status )); then
+                remaining=$(( (status - current_time) / 60 ))
+                echo "ℹ️ Skipping $tool (postponed, about $remaining minutes left)"
+                continue
+            fi
+        fi
+    fi
             # Execute tools
  case "$tool" in
 
@@ -1504,6 +1748,12 @@ fi
 			 dig axfr "'@'$dns_server" 
                        wait $!  # Wait for it to complete
                        echo  "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 		      	;;
 
 		 dnsenum)
@@ -1513,7 +1763,12 @@ fi
 			 dnsenum -enum "$dns_server"
 			 wait $!  # Wait for it to complete
                        echo  "Completed"
-
+  # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			;;
 
 	 	
@@ -1552,6 +1807,12 @@ fi
 wpscan --url "http://$dns_server/" --wp-plugins-dir "$wp_content_plugins_path" -e ap,dbe,u,m,vp --plugins-detection aggressive --output "$output_file"
 wait $!  # Wait for it to complete
                         echo   "Completed"
+                          # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
                     ;;
 
 
@@ -1572,6 +1833,12 @@ wait $!  # Wait for it to complete
       fi
 wait $!  # Wait for it to complete
                         echo  "Completed"
+                          # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			 ;;
 
 
@@ -1603,6 +1870,12 @@ output_file="$OUTPUT_DIR/gobuster_dir.txt"
       fi
 wait $!  # Wait for it to complete
                         echo   "Completed"
+                          # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			 ;;
 
 
@@ -1618,6 +1891,12 @@ output_file="$OUTPUT_DIR/enumforlinux.txt"
       fi
       wait $!  # Wait for it to complete
                        echo  "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 
 			 ;;
 
@@ -1632,6 +1911,12 @@ output_file="$OUTPUT_DIR/enumforlinux.txt"
       fi
 wait $!  # Wait for it to complete
                         echo    "Completed"
+                          # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			 ;;
 
 
@@ -1664,6 +1949,12 @@ wait $!  # Wait for it to complete
       fi
 wait $!  # Wait for it to complete
                        echo  "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			 ;;
 
 
@@ -1673,6 +1964,12 @@ wait $!  # Wait for it to complete
 			 impacket #not done yet :
 wait $!  # Wait for it to complete
                         echo   "Completed"
+                          # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			 ;;
 
 
@@ -1693,6 +1990,12 @@ wait $!  # Wait for it to complete
       fi
 wait $!  # Wait for it to complete
                      echo "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			;;
 
 
@@ -1713,6 +2016,12 @@ wait $!  # Wait for it to complete
       fi
       wait $!  # Wait for it to complete
                       echo   "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
  			 ;;
 
 
@@ -1720,7 +2029,12 @@ wait $!  # Wait for it to complete
   impacket)
 
 			 impacket #not done yet : wait $!  # Wait for it to complete // echo    "Completed"
-
+  # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			 ;;
 
 
@@ -1743,6 +2057,12 @@ wait $!  # Wait for it to complete
 			  
 wait $!  # Wait for it to complete
                        echo    "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 			 ;;
 
 
@@ -1805,6 +2125,12 @@ output_file="$OUTPUT_DIR/redis_exploit_output.txt"
     fi
 wait $!  # Wait for it to complete
                       echo   "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -1878,6 +2204,12 @@ wait $!  # Wait for it to complete
       fi
 wait $!  # Wait for it to complete
                    echo    "Completed"
+                     # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
    ;;
 
 
@@ -1921,6 +2253,12 @@ echo     "Valuable subdomains found. Proceeding with further analysis."
 echo     "Valuable directories found. Proceeding with further analysis."
 wait $!  # Wait for it to complete
                      echo     "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 ;;
 
 
@@ -1969,6 +2307,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2058,6 +2402,12 @@ echo  "Running Hydra for brute-force attack on POST request."
     fi
 wait $!  # Wait for it to complete
                    echo    "Completed"
+                     # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2105,6 +2455,12 @@ rpcinfo)
     fi
 wait $!  # Wait for it to complete
                      echo    "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2174,6 +2530,12 @@ output_file="$OUTPUT_DIR/medusa_$service.txt"
     fi
 wait $!  # Wait for it to complete
                        echo     "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2249,6 +2611,12 @@ echo    "Running John the Ripper for password cracking."
     fi
 wait $!  # Wait for it to complete
                       echo     "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2322,6 +2690,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                       echo      "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2365,6 +2739,12 @@ echo   "Checking protocol for $dns_server..."
     echo     "Nikto is running ...."
         wait $!  # Wait for it to complete
                        echo     "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
         ;;
 
 
@@ -2429,6 +2809,12 @@ echo   "Checking protocol for $dns_server..."
     fi
 wait $!  # Wait for it to complete
                       echo     "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2486,6 +2872,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                        echo     "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2549,6 +2941,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                       echo     "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2602,6 +3000,12 @@ output_file="$OUTPUT_DIR/rdp_sec_check_results.txt"
     fi
 wait $!  # Wait for it to complete
                        echo     "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2641,6 +3045,12 @@ echo  "Checking Remote Desktop Protocol (RDP) service with xrdp."
     fi
 wait $!  # Wait for it to complete
                     echo    "Completed"
+                      # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
   redis-brute)
@@ -2692,6 +3102,12 @@ output_file="$OUTPUT_DIR/redis_brute_results.txt"
     fi
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
                  vncviewer)
@@ -2737,6 +3153,12 @@ output="$OUTPUT_DIR/vncviewer.txt"
     fi
 wait $!  # Wait for it to complete
                      echo     "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2774,6 +3196,12 @@ output_file="$OUTPUT_DIR/flask_scan.txt"
     fi
 wait $!  # Wait for it to complete
                        echo      "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2811,6 +3239,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                        echo    "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
     
@@ -2848,6 +3282,12 @@ wait $!  # Wait for it to complete
 
     wait $!  # Wait for it to complete
                        echo     "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -2885,6 +3325,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                        echo      "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
   sqlmap)
@@ -2920,6 +3366,12 @@ output_file="$OUTPUT_DIR/sqlmap.txt"
     fi
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 	 		;;
 
     vhost)
@@ -2955,6 +3407,12 @@ output="$OUTPUT_DIR/vhost_output.txt"
     fi
 wait $!  # Wait for it to complete
                      echo    "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 	 		;;
 
   whatweb)
@@ -2972,6 +3430,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                     echo     "Completed"
+                      # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 		 	;;
 
   searchsploit)
@@ -3019,6 +3483,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
   rpcclient)
@@ -3043,6 +3513,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                       echo     "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
   evil-winrm)
@@ -3106,6 +3582,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                      echo    "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3155,6 +3637,12 @@ echo   "Running Redis-CLI..."
     fi
 wait $!  # Wait for it to complete
                      echo    "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3210,6 +3698,12 @@ echo    "User: $mssql_user"
     fi
 wait $!  # Wait for it to complete
                       echo   "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3265,6 +3759,12 @@ echo "Error: SQLCMD execution failed. Check the logs in $output_file."
     fi
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3296,6 +3796,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                        echo    "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3321,6 +3827,12 @@ echo   "Performing NSLookup for DNS server: $dns_server"
     fi
 wait $!  # Wait for it to complete
                      echo   "Completed"
+                       # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3378,6 +3890,12 @@ wait $!  # Wait for it to complete
     fi
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3429,6 +3947,12 @@ echo   "Running kinit for Kerberos authentication..."
     fi
 wait $!  # Wait for it to complete
                        echo     "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3456,6 +3980,12 @@ wait $!  # Wait for it to complete
     ldapsearch -x -H "ldap://$ip_address" -b "dc=example,dc=com" -D "cn=admin,dc=example,dc=com" -w "password"
 wait $!  # Wait for it to complete
                        echo    "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3495,6 +4025,12 @@ ldapbrute)
     ldapbrute -H "ldap://$ip_address" -D "cn=admin,dc=example,dc=com" -w "password" -f "wordlist.txt"
 wait $!  # Wait for it to complete
                       echo   "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3556,6 +4092,12 @@ echo    "Running CrackMapExec for SMB enumeration."
     fi
 wait $!  # Wait for it to complete
                        echo    "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3589,6 +4131,12 @@ echo    "Running SMB Share enumeration using smb-enum-shares."
     fi
 wait $!  # Wait for it to complete
                        echo    "Completed"
+                         # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
     ;;
 
 
@@ -3616,6 +4164,12 @@ wait $!  # Wait for it to complete
       smbclient -L "$ip_address" -U "guest" -N
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
       ;;
 
 
@@ -3638,6 +4192,12 @@ echo  "SSH Banner Grab Output:"
 echo   "$banner_ssh"
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
 
        ;;
 
@@ -3682,6 +4242,12 @@ echo "SMTP misconfiguration detected. Attempting Telnet connection to SMTP (Port
     fi
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
   ;;
 
   ftp)
@@ -3711,11 +4277,17 @@ put test.txt
 EOF
 wait $!  # Wait for it to complete
                       echo    "Completed"
+                        # Remove from postponed list after successful execution
+                if [[ -n "${POSTPONED_TOOLS[$tool]}" ]]; then
+                    unset "POSTPONED_TOOLS[$tool]"
+                    unset "TOOL_STATUS[$tool]"
+                    save_postponed_state
+                fi
+                      
 ;; 
 
     esac
-
-done
+    done
 
 
    log "execute_tools: Running tools..." "INFO"
@@ -3734,6 +4306,9 @@ net() {
     # Main script execution
     echo "🚀 Starting script execution..."
 
+    # Load any existing postponed tools state at the beginning
+    load_postponed_state
+
     # Step 1: Run tooler
     echo "🔧 Running tooler..."
     if tooler "$1" "$2"; then
@@ -3744,7 +4319,7 @@ net() {
     fi
 
     # Step 2: Run file_cleaner
-    echo "🧹 Running file_cleaner..."
+    echo "�� Running file_cleaner..."
     cleaned_file=$(file_cleaner)
     if [[ -n "$cleaned_file" ]]; then
         echo "✅ file_cleaner completed successfully. Cleaned file: $cleaned_file"
@@ -3762,16 +4337,7 @@ net() {
         return 1
     fi
 
-    # Step 4: Run execute_tools
-    echo "🛠️ Running execute_tools..."
-    if execute_tools; then
-        echo "✅ execute_tools completed successfully."
-    else
-        echo "❌ execute_tools failed. Exiting script."
-        return 1
-    fi
-
-    # Step 5: Run Investigator (only once)
+    # Step 4: Run Investigator (only once)
     echo "🕵️ Running Investigator..."
     if Investigator; then
         echo "✅ Investigator completed successfully."
@@ -3780,9 +4346,68 @@ net() {
         return 1
     fi
 
+    # Step 5: Run execute_tools
+    echo "��️ Running execute_tools..."
+    if execute_tools; then
+        echo "✅ execute_tools completed successfully."
+    else
+        echo "❌ execute_tools failed. Exiting script."
+        return 1
+    fi
 
+    # Handle postponed tools
+    if [[ ${#POSTPONED_TOOLS[@]} -gt 0 ]]; then
+        echo -e "\n📋 You have ${#POSTPONED_TOOLS[@]} postponed tools:"
+        echo "--------------------------------"
+        for tool in "${!POSTPONED_TOOLS[@]}"; do
+            status="${TOOL_STATUS[$tool]}"
+            if [[ "$status" == "manual" ]]; then
+                echo "- $tool (Waiting for manual run)"
+            else
+                echo "- $tool (Will run in $status minutes)"
+            fi
+        done
+        echo "--------------------------------"
 
+        echo -e "\nWould you like to run any of the postponed tools now? (y/n)"
+        read -r run_now
+
+        if [[ "$run_now" =~ ^[Yy]$ ]]; then
+            echo -e "\nWhich tool would you like to run? (Enter the tool name or 'all' for all tools)"
+            read -r tool_to_run
+
+            if [[ "$tool_to_run" == "all" ]]; then
+                echo "🔄 Running all postponed tools..."
+                run_postponed_tools
+            else
+                # Check if the specified tool is in the postponed list
+                if [[ -n "${POSTPONED_TOOLS[$tool_to_run]}" ]]; then
+                    echo "🔄 Running $tool_to_run..."
+                    TEMP_ARRAY_TOOL_TOKEN["${POSTPONED_TOOLS[$tool_to_run]}"]="$tool_to_run"
+                    unset "POSTPONED_TOOLS[$tool_to_run]"
+                    unset "TOOL_STATUS[$tool_to_run]"
+                    execute_tools
+                else
+                    echo "❌ $tool_to_run is not in the postponed tools list."
+                fi
+            fi
+        else
+            echo -e "\nℹ️ You can run postponed tools later using:"
+            echo "   ./NetReconX.sh --run-postponed"
+            # Save the state before exiting
+            save_postponed_state
+        fi
+    else
+        echo "ℹ️ No tools were postponed."
+    fi
+
+    echo "🎉 All tasks completed successfully!"
 }
 
-
-net "$1" "$2" 
+# Check if we're running postponed tools
+if [[ "$1" == "--run-postponed" ]]; then
+    load_postponed_state  # Load state before handling postponed tools
+    handle_postponed_tools
+else
+    net "$1" "$2"
+fi
