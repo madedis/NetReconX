@@ -1697,7 +1697,7 @@ wait $!  # Wait for it to complete
 
 
 
-  droopesca-n)
+  droopescan)
 
 			 echo "Running Droopescan for Drupal vulnerability scanning."
 			   output_file="$OUTPUT_DIR/droopescan.txt"
@@ -1809,7 +1809,7 @@ wait $!  # Wait for it to complete
 
 
 
-  wfu-zz)
+  wfuzz)
 
    echo  "Starting Fuzz on Parameter grabbed via in_vs"
 
@@ -1973,7 +1973,7 @@ wait $!  # Wait for it to complete
 
 
 
-                 hydr-a)
+                 hydra)
 
 echo  "Running Hydra for brute-force attack on POST request."
 
@@ -2887,7 +2887,7 @@ wait $!  # Wait for it to complete
                        echo      "Completed"
     ;;
 
-  sqlma-p)
+  sqlmap)
 
     echo    "Running SQLMap for SQL injection testing."
 
@@ -2957,7 +2957,7 @@ wait $!  # Wait for it to complete
                      echo    "Completed"
 	 		;;
 
-  whatwe-b)
+  whatweb)
 
 			echo     "Running WhatWeb for STACK Discovery"
 
@@ -3214,7 +3214,7 @@ wait $!  # Wait for it to complete
 
 
 
-sqlcm-d)
+sqlcmd)
 
   echo     "Running SQLCMD..."
 
